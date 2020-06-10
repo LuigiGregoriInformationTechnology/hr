@@ -3,7 +3,7 @@
     <data>
         <template id="assets_backend" name="hr_attendance_quagga assets" inherit_id="web.assets_backend">
             <xpath expr="." position="inside">
-                <script src="/hr_attendance_quagga/static/lib/quagga.js"></script>
+                <script src="/hr_attendance_quagga/static/lib/html5-qrcode.min.js"></script>
                 <script src="/hr_attendance_quagga/static/src/js/attendance_quagga.js"></script>
                 <link rel="stylesheet" href="/hr_attendance_quagga/static/src/css/style.css" type="text/css"/>
             </xpath>

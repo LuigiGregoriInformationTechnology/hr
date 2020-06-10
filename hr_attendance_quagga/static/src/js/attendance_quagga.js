@@ -1,13 +1,15 @@
 odoo.define('hr_attendance_quagga.attendance_quagga', function (require) {
     "use strict";
 
+    var core = require('web.core');
+    var _t = core._t;
     var session = require('web.session');
     var KioskMode = require('hr_attendance.kiosk_mode');
 
     KioskMode.include({
         events: _.defaults({
-            'click #btn-start': 'widgetStartScanner',
-            'click #btn-stop': 'widgetStopScanner',
+            'click #btn-start': '_createWidget',
+            'click #btn-stop': '_destroyWidget',
         }, KioskMode.prototype.events),
 
         _container: null,
@@ -15,11 +17,10 @@ odoo.define('hr_attendance_quagga.attendance_quagga', function (require) {
         _btn_stop: null,
         _audio: null,
 
-        // Avoid being called multiple times from Quagga
-        _processing: false,
+        _enabled: false,
 
-        // Prevent duplicate
-        _barcode: null,
+        _html5qrcode: null,
+        _cameraId: null,
 
         start: function () {
             // Odoo 10.0 compatibility, single codebase
@@ -38,169 +39,134 @@ odoo.define('hr_attendance_quagga.attendance_quagga', function (require) {
             return this._super();
         },
 
-        // Resolve overlay canvas problem
-        _fixup_canvas: function () {
-            var video = this._container.find('video');
-            var canvas = this._container.find('canvas');
-
-            canvas.css('position', 'absolute');
-            video.css('width', '100%');
-            canvas.css('width', video.width());
-
-            var bwidth = this.$('.o_hr_attendance_kiosk_mode').outerWidth();
-            var left = (bwidth - video.width()) / 2;
-            canvas.css('left', left);
-        },
-
-        widgetStartScanner: function () {
-            // Unfortunately this does not work in start() after calling super
+        _createWidget: function () {
+            // unfortunately this does not work in start() after calling super
+            this._html5qrcode = new Html5Qrcode('scanner-container', false);
             this._container = this.$('#scanner-container');
             this._btn_start = this.$('#btn-start');
             this._btn_stop = this.$('#btn-stop');
             this._audio = this.$('#audio').get(0);
-
-            // Clear the container
-            this._container.empty();
-
-            // Start the live stream capture
-            this.startScanner();
-            this._btn_stop.delay(500).fadeIn(500);
-            this._btn_start.fadeOut(500);
-
-            var self = this;
-            this._container.find('canvas').ready(function () {
-                self._container.delay(900).slideDown(900);
-                setTimeout(function () {
-                    self._fixup_canvas();
-                }, 905);
-            });
+            this._selectDevice();
         },
 
-        widgetStopScanner: function () {
-            Quagga.stop();
+        _destroyWidget: function () {
+            this._stopScanner();
             this._btn_start.delay(500).fadeIn(500);
             this._btn_stop.fadeOut(500);
-            this._container.delay(500).slideUp(900);
         },
 
-        startScanner: function () {
-            var self = this;
-            Quagga.init({
-                inputStream: {
-                    name: 'Live',
-                    type: 'LiveStream',
-                    target: self._container.get(0),
-                    constraints: {
-                        width: 480,
-                        height: 320,
-                        facingMode: 'environment',
-                    },
+        _startScanner: function () {
+            if (this._cameraId === null) {
+                console.error('cameraId is null!');
+                return;
+            }
+
+            this._html5qrcode.start(this._cameraId,
+                {
+                    fps: 10,
+                    qrbox: 250,
                 },
-                decoder: {
-                    // TODO: configurable?
-                    readers: [
-                        'code_128_reader',
-                        'ean_reader',
-                        'code_39_reader',
-                        'code_39_vin_reader',
-                        // 'codabar_reader',
-                        // 'upc_reader',
-                        // 'upc_e_reader',
-                        // 'i2of5_reader',
-                        // '2of5_reader',
-                        'code_93_reader',
-                    ],
-                },
-                multiple: false,
-                locate: true,
-                numOfWorkers: 4,
-            }, function (error) {
-                if (error) {
-                    console.error(error);
-                } else {
-                    Quagga.start();
-                    self._fixup_canvas();
-                }
-            });
-
-            Quagga.onProcessed(function (result) {
-                if (!result) {
-                    return;
-                }
-
-                var drawingCtx = Quagga.canvas.ctx.overlay;
-                var drawingCanvas = Quagga.canvas.dom.overlay;
-
-                if (result.boxes) {
-                    var w = parseInt(drawingCanvas.getAttribute('width'), 10);
-                    var h = parseInt(drawingCanvas.getAttribute('height'), 10);
-
-                    drawingCtx.clearRect(0, 0, w, h);
-
-                    result.boxes.filter(function (box) {
-                        return box !== result.box;
-                    }).forEach(function (box) {
-                        Quagga.ImageDebug.drawPath(box,
-                            {x: 0, y: 1},
-                            drawingCtx,
-                            {color: 'green', lineWidth: 2});
-                    });
-                }
-
-                if (result.box) {
-                    Quagga.ImageDebug.drawPath(result.box,
-                        {x: 0, y: 1},
-                        drawingCtx,
-                        {color: 'blue', lineWidth: 2});
-                }
-
-                if (result.codeResult && result.codeResult.code) {
-                    Quagga.ImageDebug.drawPath(result.line,
-                        {x: 'x', y: 'y'},
-                        drawingCtx,
-                        {color: 'red', lineWidth: 3});
-                }
-            });
-
-            Quagga.onDetected(function (result) {
-                if (self._processing) {
-                    return;
-                }
-
-                var code = result.codeResult.code;
-                if (code === self._barcode) {
-                    return;
-                }
-
-                self._barcode = code;
-
-                self._audio.play();
-                self._processing = true;
-
-                self._rpc({
-                    model: 'hr.employee',
-                    method: 'attendance_scan',
-                    args: [code],
-                }).then(function (scanres) {
-                    if (scanres.action) {
-                        // Stop the scanner and live stream capture (important)
-                        self.widgetStopScanner();
-                        self._barcode = null;
-                        self.do_action(scanres.action);
-                    } else if (scanres.warning) {
-                        setTimeout(function () {
-                            self._barcode = null;
-                        }, 5000);
-                        self.do_warn(scanres.warning);
+                (qrCodeMessage) => {
+                    console.log(`QR Code detected: ${qrCodeMessage}`);
+                    if (this._enabled) {
+                        this._attendance_scan(qrCodeMessage);
                     }
-                }).fail(function (reason) {
-                    // The web client loses odoo connection
-                    // TODO: any way to check when odoo reconnects back?
-                    self._barcode = null;
-                    console.error(reason);
-                }).always(function () {
-                    self._processing = false;
+                },
+                () => undefined
+            ).catch((err) => {
+                console.log(`Unable to start scanning, error: ${err}`);
+            });
+        },
+
+        _stopScanner: function () {
+            this._html5qrcode.stop().then(() => {
+                console.log('QR Code scanning stopped.');
+            }).catch((err) => {
+                console.log(`Unable to stop scanning: ${err}`);
+            });
+        },
+
+        _attendance_scan: function (code) {
+            this._audio.play();
+
+            this._rpc({
+                model: 'hr.employee',
+                method: 'attendance_scan',
+                args: [code],
+            }).then((scanres) => {
+                if (scanres.action) {
+                    // let the sound play
+                    setTimeout(() => {
+                        this._destroyWidget();
+                        this.do_action(scanres.action);
+                    }, 500);
+                } else if (scanres.warning) {
+                    this.do_warn(scanres.warning);
+                    this._pauseFor(5000);
+                }
+            }).fail((reason) => {
+                // the web client loses odoo connection
+                // TODO: any way to check when odoo reconnects back?
+                console.error(reason);
+                this._pauseFor(5000);
+            });
+        },
+
+        _pauseFor: function (duration) {
+            this._enabled = false;
+            setTimeout(() => {
+                this._enabled = true;
+            }, duration);
+        },
+
+        _startWithDevice: function (cameraId) {
+            this._container.empty();
+            this._btn_stop.delay(500).fadeIn(500);
+            this._btn_start.fadeOut(500);
+            this._cameraId = cameraId;
+            this._enabled = true;
+            this._startScanner();
+        },
+
+        _selectDevice: function () {
+            // this method will trigger user permissions
+            Html5Qrcode.getCameras().then((results) => {
+                // my firefox returns duplicated camera device
+                var devices = _.uniq(results, false, function (device) {
+                    return device.id;
                 });
+
+                // no selection for single device
+                if (devices.length === 1) {
+                    this._startWithDevice(devices[0].id);
+                    return;
+                }
+
+                var deviceSelection = document.createElement('select');
+                var option = document.createElement('option');
+                option.selected = true;
+                option.appendChild(document.createTextNode(
+                    _t('Select camera device')));
+                deviceSelection.appendChild(option);
+
+                devices.forEach((device) => {
+                    option = document.createElement('option');
+                    option.value = device.id;
+                    var text = device.label
+                        ? device.label.substr(0, 30) : device.id;
+                    option.appendChild(document.createTextNode(text));
+                    deviceSelection.appendChild(option);
+                });
+
+                this._container.empty();
+                this._container.append(deviceSelection);
+
+                deviceSelection = $(deviceSelection);
+                deviceSelection.change(() => {
+                    this._startWithDevice(deviceSelection.val());
+                });
+            }).catch((err) => {
+                console.error(err);
             });
         },
     });
